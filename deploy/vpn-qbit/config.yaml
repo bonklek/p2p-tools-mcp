@@ -1,0 +1,13 @@
+# Container-isolated topology: Gluetun, not the host NordVPN CLI, is the
+# network boundary. The host-level guard must therefore be disabled.
+network_guard:
+  enabled: false
+
+jackett:
+  baseUrl: http://127.0.0.1:9117
+  # apiKey: set-locally
+
+qbittorrent:
+  baseUrl: http://127.0.0.1:8080
+  # username: set-locally
+  # password: set-locally

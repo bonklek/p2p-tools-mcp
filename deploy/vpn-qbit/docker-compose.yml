@@ -1,0 +1,56 @@
+services:
+  vpn:
+    image: qmcgaw/gluetun@sha256:e3272b29a4bc177b389fbdcb54cf9716ccbfc30f04d8b7a35b0a5be9cdb58461
+    container_name: p2p-vpn
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - "127.0.0.1:8080:8080"   # qBittorrent WebUI
+      - "127.0.0.1:9117:9117"   # Jackett WebUI / API
+      - "127.0.0.1:6881:6881"
+      - "127.0.0.1:6881:6881/udp"
+    environment:
+      VPN_SERVICE_PROVIDER: nordvpn
+      VPN_TYPE: openvpn
+      OPENVPN_USER: ${NORDVPN_SERVICE_USER}
+      OPENVPN_PASSWORD: ${NORDVPN_SERVICE_PASSWORD}
+      SERVER_COUNTRIES: ${NORDVPN_COUNTRY:-United States}
+      TZ: ${TZ:-Etc/UTC}
+      # Keep the host loopback reachable for Hermes and local clients.
+      FIREWALL_OUTBOUND_SUBNETS: 127.0.0.0/8
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent@sha256:6816d2b144b1eb97665f886e41e18a14d026ba78c9d0953fc68a1211ea819433
+    container_name: p2p-qbittorrent
+    network_mode: service:vpn
+    depends_on:
+      vpn:
+        condition: service_healthy
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+      WEBUI_PORT: 8080
+      TORRENTING_PORT: 6881
+    volumes:
+      - ${QBIT_CONFIG_DIR:-./data/qbit}:/config
+      - ${TORRENT_DOWNLOADS:-./data/downloads}:/downloads
+    restart: unless-stopped
+
+  jackett:
+    image: lscr.io/linuxserver/jackett@sha256:80a99d9647a05734224c55c00212300a7255cc81cac6ea2dc144cb67712ea005
+    container_name: p2p-jackett
+    network_mode: service:vpn
+    depends_on:
+      vpn:
+        condition: service_healthy
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      - ${JACKETT_CONFIG_DIR:-./data/jackett}:/config
+    restart: unless-stopped

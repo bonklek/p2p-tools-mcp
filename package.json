@@ -1,0 +1,49 @@
+{
+  "name": "p2p-tools-mcp",
+  "version": "0.2.0",
+  "private": true,
+  "license": "SEE LICENSE IN LICENSE",
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "LICENSE",
+    "README.md",
+    "docs/cli.md",
+    "docs/hermes-config.md",
+    "docs/migration-from-standalone.md",
+    "docs/user-guide.md",
+    "docs/versioning.md",
+    "deploy/vpn-qbit/.env.example",
+    "deploy/vpn-qbit/config.yaml",
+    "deploy/vpn-qbit/docker-compose.yml",
+    "deploy/vpn-qbit/README.md",
+    "examples/config.yaml"
+  ],
+  "type": "module",
+  "bin": {
+    "p2p-tools": "dist/p2p-tools.js",
+    "vpn-mcp": "dist/vpn-mcp.js",
+    "torrent-mcp": "dist/torrent-mcp.js"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "prepack": "npm run build && npm test && npm run check",
+    "check": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "fast-xml-parser": "^5.10.1",
+    "yaml": "^2.8.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

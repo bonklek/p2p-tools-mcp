@@ -1,0 +1,51 @@
+# Example p2p-tools-mcp configuration
+#
+# VPN lifecycle is separate from torrent lifecycle.
+# torrent-mcp can enforce only the operational network guard predicate; it does not auto-connect VPN.
+# Windows, macOS, and Linux are equal deployment targets. Local defaults use loopback.
+
+vpn:
+  provider: nordvpn
+  command: nordvpn
+  # Optional default used by vpn_connect when no country argument is supplied.
+  # defaultCountry: United_States
+
+network_guard:
+  enabled: true
+  requireVpnConnected: true
+  # Stable internal guard IDs, not MCP tool names. The mapping is documented in
+  # docs/user-guide.md#network-guard. Defaults are shown here explicitly.
+  guarded_operations:
+    - torrent_search
+    - torrent_caps
+    - torrent_list_indexers
+    - torrent_add
+  # Optional stricter mode: also guard local qBittorrent Web API lifecycle calls.
+  # guarded_operations:
+  #   - torrent_search
+  #   - torrent_caps
+  #   - torrent_list_indexers
+  #   - torrent_add
+  #   - torrent_list
+  #   - torrent_get
+  #   - torrent_pause
+  #   - torrent_resume
+  #   - torrent_delete
+
+jackett:
+  # Default same-host Jackett endpoint.
+  baseUrl: http://127.0.0.1:9117
+  # Keep populated copies outside git. A process supervisor may instead inject
+  # JACKETT_API_KEY.
+  # apiKey: <your-jackett-api-key>
+
+qbittorrent:
+  # Default same-host qBittorrent Web UI endpoint.
+  baseUrl: http://127.0.0.1:8080
+  # QBITTORRENT_USERNAME and QBITTORRENT_PASSWORD can override these values.
+  # username: <your-qbittorrent-username>
+  # password: <your-qbittorrent-password>
+
+timeouts:
+  commandMs: 15000
+  httpMs: 15000
