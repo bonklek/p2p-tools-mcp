@@ -9,7 +9,7 @@ export interface VpnStatusLike {
 
 export interface NetworkGuardResult {
   allowed: boolean;
-  reason: 'network_guard_disabled' | 'operation_not_guarded' | 'vpn_connected' | 'vpn_not_connected' | 'status_provider_error';
+  reason: 'network_guard_disabled' | 'operation_not_guarded' | 'vpn_connected' | 'vpn_not_connected' | 'vpn_requirement_disabled' | 'status_provider_error';
   operation?: string;
   status?: VpnStatusLike;
   error?: string;
@@ -31,7 +31,7 @@ export async function checkNetworkGuard(config: AppConfig, statusProvider: VpnSt
     if (config.networkGuard.requireVpnConnected && !status.connected) {
       return { allowed: false, reason: 'vpn_not_connected', operation, status };
     }
-    return { allowed: true, reason: 'vpn_connected', operation, status };
+    return { allowed: true, reason: status.connected ? 'vpn_connected' : 'vpn_requirement_disabled', operation, status };
   } catch {
     return { allowed: false, reason: 'status_provider_error', operation };
   }

@@ -2,11 +2,16 @@
 #
 # VPN lifecycle is separate from torrent lifecycle.
 # torrent-mcp can enforce only the operational network guard predicate; it does not auto-connect VPN.
+# This is a pre-operation check, not ongoing routing enforcement or a kill switch.
 # Windows, macOS, and Linux are equal deployment targets. Local defaults use loopback.
 
 vpn:
   provider: nordvpn
   command: nordvpn
+  # On Windows, opt in to NordVPN's public egress check for the pre-operation
+  # guard. This checks the host's current public IP; it does not prove that a
+  # particular app is routed through the tunnel or that a kill switch works.
+  # windowsStatusProvider: nord-egress
   # Optional default used by vpn_connect when no country argument is supplied.
   # defaultCountry: United_States
 
@@ -47,5 +52,25 @@ qbittorrent:
   # password: <your-qbittorrent-password>
 
 timeouts:
+  # Integer milliseconds, 1 through 2147483647; includes HTTP response bodies.
   commandMs: 15000
   httpMs: 15000
+
+# Optional Jev ranking. Store the API key in a separate local file and keep
+# this populated configuration outside Git. Ranking sends query, displayed
+# file titles, and sizes to TypeSafe AI; it never starts a download.
+# jev:
+#   apiKeyFile: ./private/jev-key.txt
+#   model: jev-latest
+#   timeoutMs: 15000
+
+# Optional adapters are isolated from one another. Enable only configured services.
+# See docs/basket.md for authentication, defaults, limits, and compatibility.
+integrations:
+  slskd: { enabled: false }
+  prowlarr: { enabled: false }
+  gluetun: { enabled: false }
+  cross_seed: { enabled: false }
+  transmission: { enabled: false }
+  syncthing: { enabled: false }
+  ipfs: { enabled: false }

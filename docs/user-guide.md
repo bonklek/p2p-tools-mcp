@@ -43,7 +43,7 @@ MCP client and p2p-tools-mcp
 Jackett + qBittorrent + dedicated VPN network boundary
 ```
 
-This topology works consistently on Windows, macOS, and Linux. The host-level `network_guard` should be disabled because the service network boundary—not the host CLI—is enforcing VPN routing. The included example uses containers; see [Torrent-side VPN isolation](../deploy/vpn-qbit/README.md).
+This topology is intended for Docker hosts on Windows, macOS, and Linux. Disable the host-level `network_guard` only when the service network boundary is configured and verified to enforce VPN routing. The included example uses containers; see [Torrent-side VPN isolation](../deploy/vpn-qbit/README.md) for setup, recovery, and runtime checks.
 
 ### Host-wide VPN
 
@@ -58,7 +58,7 @@ Do not enable the built-in guard on a platform where `vpn_status` is unsupported
 - qBittorrent with its Web UI enabled for lifecycle operations.
 - NordVPN's supported Linux CLI only for the complete built-in VPN/guard workflow.
 
-CI currently covers Node.js 24 on Windows, macOS, and Linux. The package's declared minimum remains Node.js 20.
+The built package declares Node.js 20 as its runtime minimum. Source development, tests, and packing require Node.js 20.19+, 22.12+, or 24+ (excluding 21/23) because of the locked development tools. CI is configured for Node.js 24 on all three platforms and 20.19/22.12 on Linux. Local verification and remaining gaps are recorded in [Validation](validation.md).
 
 ## Build and test
 
@@ -175,6 +175,8 @@ Prefer a private configuration or secret injection from the process supervisor. 
 
 On Windows, configure `vpn.command` as the trusted absolute path of the NordVPN command executable. VPN child processes receive a restricted system environment and do not inherit the caller's `PATH`. The default `nordvpn` command is intended for standard Linux installations.
 
+Configuration rejects unknown keys, malformed sections, non-boolean guard flags, unknown operation IDs, and duplicate spellings of the same setting. Timeouts must be integer milliseconds from 1 to 2,147,483,647. Service base URLs allow reverse-proxy path prefixes but reject user-info credentials, query strings, fragments, and non-HTTP(S) schemes. Configure the final endpoint: HTTP redirects are rejected to keep credentials within that endpoint's authority.
+
 ## Network guard
 
 The guard uses stable internal operation IDs for compatibility. Canonical tools map to these IDs:
@@ -240,6 +242,8 @@ The server reserves stdout for MCP protocol data. A directly launched entrypoint
 
 ## Use the CLI
 
+The [optional basket guide](basket.md) covers slskd, Prowlarr, Gluetun, cross-seed, Transmission, Syncthing, and IPFS. These adapters default to disabled, expose only configured tools, and isolate ordinary service failures. Existing Jackett/qBittorrent configuration and commands remain supported.
+
 The npm package installs `p2p-tools` alongside the two MCP binaries. From a source build, run the equivalent entrypoint with `node dist/p2p-tools.js`.
 
 ```sh
@@ -292,9 +296,13 @@ Arguments: none. Linux CLI only. Returns a minimized parsed status such as `conn
 
 `country` is optional; `vpn.defaultCountry` is the fallback. Supported on Linux and through the mapped Windows command switches. Not supported on macOS.
 
+After an accepted lifecycle command, the adapter attempts one status observation. An observed matching state returns `connected: true` (connect) or `false` (disconnect), `command_accepted: true`, and `state_verified: true`. A recognized opposite state returns `VPN_STATE_UNCONFIRMED`; check status again rather than assuming the transition finished. If observation fails or is unsupported, success reports only command acceptance: `connected: null`, `command_accepted: true`, `state_verified: false`. This is the expected Windows result. Unknown/transitional status text never verifies a connection or disconnection.
+
 ### `vpn_disconnect`
 
 Arguments: none. Supported on Linux and through the mapped Windows command switch. Not supported on macOS.
+
+Uses the same acceptance/observation fields as `vpn_connect`.
 
 ### `vpn_public_ip`
 
@@ -330,6 +338,8 @@ All fields are optional at the schema level because some typed Torznab searches 
 - `limit` is 1–100; `offset` is zero or greater.
 
 Results include normalized title, BTIH-only magnet URI when safe, info hash, sizes, swarm counts, publish date, categories, IMDb ID, indexer, and ratio factors. Raw comments, arbitrary attributes, peer names, and unsafe download URLs are omitted.
+
+`total` is the number of results in this response, not a count of all matching results upstream. `magnet_uri: null` can mean no supported safe magnet was supplied. URL-only and private-tracker results may require the service UI; the package does not retain an opaque handle for later acquisition. A malformed response or Torznab error is reported as failure rather than an empty successful search.
 
 ### `jackett_caps`
 
@@ -400,7 +410,7 @@ Supported filters: `all`, `downloading`, `completed`, `paused`, `active`, `inact
 
 Supported sort fields: `added_on`, `progress`, `dlspeed`, `upspeed`, `eta`, `name`.
 
-`limit` is 1–1000. Results omit local save paths.
+`limit` is 1–1000. Results omit local save paths. An empty category or tag selects uncategorized or untagged torrents. The `paused` filter is translated according to the service's reported version (4.x/5.x).
 
 ### `qbittorrent_get_torrent`
 
@@ -409,6 +419,8 @@ Supported sort fields: `added_on`, `progress`, `dlspeed`, `upspeed`, `eta`, `nam
 ```
 
 Returns a normalized summary plus selected detailed properties. Local filesystem paths are redacted or omitted.
+
+All get/pause/resume/delete targets use individual 40- or 64-character hexadecimal hashes. Supply either `hash` or `hashes`, never both. `all`, pipe-delimited values, and empty targets are invalid; use an explicit array for multiple torrents. Unknown tool arguments and simultaneous compatibility spellings are rejected.
 
 ### `qbittorrent_pause_torrent` and `qbittorrent_resume_torrent`
 
@@ -455,7 +467,9 @@ Do not use aliases in new MCP registrations, prompts, or automation.
 
 ## Verification workflow
 
-After the MCP client restarts:
+After the MCP client restarts, call `p2p_doctor` for read-only service and host-guard diagnostics. Inspect `data.status` and each check's `next_action`; `ok: true` means a report was produced, even if its status is `blocked`. Traffic isolation is always unverified. The same report is available from `p2p-tools doctor`; see [setup diagnostics](cli.md#setup-diagnostics).
+
+For a separately planned end-to-end check:
 
 1. Call `jackett_test_connection`.
 2. Call `qbittorrent_test_connection`.
@@ -474,8 +488,8 @@ The connection tests prove credentials and reachability. A search returning no r
 - Treat the configuration as a secret-bearing file.
 - Keep Jackett and qBittorrent on loopback or a protected network; remote plaintext HTTP exposes credentials in transit.
 - The MCP layer is not an authentication proxy. Control which users and agents can invoke its tools.
-- Success responses are recursively redacted for credential- and path-shaped fields.
-- Known failures use fixed public error messages; unexpected exceptions become `TOOL_ERROR`.
+- Success responses are recursively redacted for credential- and path-shaped fields. This is a conservative heuristic, can obscure benign titles, and is not a guarantee against arbitrary secrets hidden in untrusted text.
+- Shared-handler failures use safe public guidance, including field-level validation issues and recovery steps; unexpected exceptions become `TOOL_ERROR`. MCP SDK schema validation can reject calls before the shared handler and uses its own error format.
 - VPN subprocesses receive a reduced environment rather than the caller's full environment.
 - `vpn_public_ip` is the only tool designed to contact a public IP-check endpoint directly.
 - Tool names and search/add requests may remain visible to the MCP client and its logs. Apply client-side retention controls appropriate to the deployment.
@@ -523,7 +537,7 @@ This usually reflects qBittorrent, tracker, peer, routing, or storage state rath
 
 - Confirm the YAML root is an object.
 - Confirm both service URLs are valid absolute URLs.
-- Confirm timeout values are positive numbers.
+- Confirm timeout values are integer milliseconds between 1 and 2,147,483,647.
 - Confirm `guarded_operations` is a list of non-empty strings.
 - Confirm `P2P_NETWORK_GUARD_ENABLED` is one of `true`, `false`, `1`, or `0`.
 

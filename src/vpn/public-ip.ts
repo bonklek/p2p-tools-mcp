@@ -1,4 +1,5 @@
 import { McpError } from '../shared/errors.js';
+import { isIP } from 'node:net';
 
 export interface PublicIpResult {
   ip: string;
@@ -11,15 +12,14 @@ export async function getPublicIp(timeoutMs = 15000, source = 'https://api.ipify
     const response = await fetch(source, { signal: controller.signal });
     if (!response.ok) throw new McpError('PUBLIC_IP_FAILED', `Public IP lookup failed: HTTP ${response.status}`);
     const text = await response.text();
-    try {
-      const json = JSON.parse(text) as { ip?: string };
-      if (json.ip) return { ip: json.ip };
-    } catch {
-      // fall back to plain-text response
-    }
-    const ip = text.trim();
-    if (!ip) throw new McpError('PUBLIC_IP_FAILED', 'Public IP lookup returned empty response');
+    let candidate: unknown = text.trim();
+    try { candidate = (JSON.parse(text) as { ip?: unknown } | null)?.ip; }
+    catch { /* Plain text is accepted only if it is an IP address. */ }
+    const ip = typeof candidate === 'string' ? candidate.trim() : '';
+    if (!isIP(ip)) throw new McpError('PUBLIC_IP_FAILED', 'Public IP lookup returned an invalid address');
     return { ip };
+  } catch {
+    throw new McpError('PUBLIC_IP_FAILED', 'Public IP lookup failed');
   } finally {
     clearTimeout(timeout);
   }

@@ -1,11 +1,13 @@
 import { execFile } from 'node:child_process';
 import { McpError } from '../shared/errors.js';
 import { redactConfig } from '../shared/redact.js';
+import { IntegrationHttp, record } from '../integrations/http.js';
 
 export interface NordVpnOptions {
   command: string;
   timeoutMs?: number;
   platform?: NodeJS.Platform;
+  windowsStatusProvider?: 'nord-egress';
 }
 
 export interface CommandResult {
@@ -34,11 +36,34 @@ export const execFileRunner: CommandRunner = (command, args, options) =>
   });
 
 export class NordVpnClient {
-  constructor(private readonly options: NordVpnOptions, private readonly runner: CommandRunner = execFileRunner) {}
+  constructor(private readonly options: NordVpnOptions, private readonly runner: CommandRunner = execFileRunner, private readonly fetchImpl: typeof fetch = fetch) {}
 
   async status(): Promise<NordVpnStatus> {
+    if ((this.options.platform ?? process.platform) === 'win32' && this.options.windowsStatusProvider === 'nord-egress') {
+      return this.statusViaNordEgress();
+    }
     const result = await this.run(statusArgs(this.options.platform));
     return parseNordVpnStatus(result.stdout || result.stderr);
+  }
+
+  private async statusViaNordEgress(): Promise<NordVpnStatus> {
+    const controller = new AbortController();
+    const timeoutMs = this.options.timeoutMs ?? 15000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => { controller.abort(); reject(new McpError('VPN_STATUS_UNKNOWN', 'NordVPN egress check timed out')); }, timeoutMs);
+    });
+    try {
+      const http = new IntegrationHttp({ enabled: true, baseUrl: 'https://api.nordvpn.com', timeoutMs, concurrency: 1, maxResponseBytes: 4096 }, this.fetchImpl);
+      const response = await Promise.race([http.request('/v1/helpers/ips/insights', controller.signal), deadline]);
+      const data = record(response.data);
+      if (typeof data.protected !== 'boolean') throw new McpError('VPN_STATUS_UNKNOWN', 'NordVPN egress check returned an invalid status');
+      return { connected: data.protected };
+    } catch {
+      throw new McpError('VPN_STATUS_UNKNOWN', 'NordVPN egress check failed');
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   async connect(country = ''): Promise<CommandResult> {
@@ -96,6 +121,9 @@ export function parseNordVpnStatus(output: string): NordVpnStatus {
     if (match) fields.set(match[1].toLowerCase(), match[2]);
   }
   const status = fields.get('status') ?? '';
+  if (!/^(?:connected|disconnected)$/i.test(status)) {
+    throw new McpError('VPN_STATUS_UNKNOWN', 'NordVPN returned an unrecognized or transitional status');
+  }
   const connected = /^connected$/i.test(status);
   return {
     connected,

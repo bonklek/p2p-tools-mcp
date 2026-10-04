@@ -2,6 +2,13 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { AppConfig } from '../shared/config.js';
 import { McpError } from '../shared/errors.js';
+import { invalidArgument, publicDiagnostic, schemaGuidance, validationError } from '../shared/diagnostics.js';
+import { createDoctorReport } from '../doctor.js';
+import { setupStatus } from '../setup.js';
+import { musicHandlers, musicToolSpecs } from '../music/workflow.js';
+import { createIntegrationRegistry } from '../integrations/registry.js';
+import { JevRanker, type RankCandidate } from '../integrations/jev.js';
+import { slskdFiltersSchema } from '../integrations/slskd-filters.js';
 import { checkNetworkGuard, type VpnStatusProvider } from '../shared/network-guard.js';
 import { mcpJsonContent, structuredResult, type ToolResult } from '../shared/tool-result.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
@@ -10,6 +17,7 @@ import { lookupCategory } from './categories.js';
 import { JackettClient } from './jackett-client.js';
 import { QbitClient } from './qbit-client.js';
 import type { QbitAddOptions, QbitListOptions } from './qbit-types.js';
+import { torrentHash, torrentHttpUrl, torrentMagnet, torrentSource } from './validation.js';
 
 export interface TorrentDeps {
   jackett: Pick<JackettClient, 'search' | 'caps' | 'listIndexers' | 'testConnection'>;
@@ -20,7 +28,7 @@ export interface TorrentDeps {
 type ToolHandler = (args: unknown) => Promise<ToolResult>;
 
 export function createDefaultTorrentDeps(config: AppConfig): TorrentDeps {
-  const vpnClient = new NordVpnClient({ command: config.vpn.command, timeoutMs: config.timeouts.commandMs });
+  const vpnClient = new NordVpnClient({ command: config.vpn.command, timeoutMs: config.timeouts.commandMs, windowsStatusProvider: config.vpn.windowsStatusProvider });
   return {
     jackett: new JackettClient({ ...config.jackett, timeoutMs: config.timeouts.httpMs }),
     qbit: new QbitClient({ ...config.qbittorrent, timeoutMs: config.timeouts.httpMs }),
@@ -28,14 +36,14 @@ export function createDefaultTorrentDeps(config: AppConfig): TorrentDeps {
   };
 }
 
-export function createTorrentToolHandlers(config: AppConfig, deps: TorrentDeps): Record<string, ToolHandler> {
+export function createTorrentToolHandlers(config: AppConfig, deps: TorrentDeps, registry = createIntegrationRegistry(config, deps.vpnStatusProvider), ranker = config.jev ? new JevRanker(config.jev) : undefined): Record<string, ToolHandler> {
   const jackettSearch = (args: unknown) => structured(async () => {
-    await requireNetworkGuard(config, deps.vpnStatusProvider, 'torrent_search');
     const input = objectArg(args);
     const searchType = optionalStringAt(input, 'search_type') ?? 'search';
     if (!['search', 'tvsearch', 'movie', 'music', 'book'].includes(searchType)) throw new McpError('INVALID_ARGUMENT', 'invalid search_type');
-    if (searchType !== 'tvsearch' && (input.season !== undefined || input.episode !== undefined)) throw new McpError('INVALID_ARGUMENT', 'season and episode are only valid for tvsearch');
-    if (searchType !== 'movie' && input.imdb_id !== undefined) throw new McpError('INVALID_ARGUMENT', 'imdb_id is only valid for movie search');
+    if (searchType !== 'tvsearch' && (input.season !== undefined || input.episode !== undefined)) throw invalidArgument('search_type', 'Use tvsearch with season or episode.');
+    if (searchType !== 'movie' && input.imdb_id !== undefined) throw invalidArgument('search_type', 'Use movie with imdb_id.');
+    await requireNetworkGuard(config, deps.vpnStatusProvider, 'torrent_search');
     return deps.jackett.search({
       query: optionalStringAt(input, 'query'),
       indexer: optionalStringAt(input, 'indexer'),
@@ -70,7 +78,7 @@ export function createTorrentToolHandlers(config: AppConfig, deps: TorrentDeps):
   });
   const qbitAddUrl = (args: unknown) => structured(async () => {
     await requireNetworkGuard(config, deps.vpnStatusProvider, 'torrent_add');
-    return deps.qbit.add(qbitAddOptions({ ...objectArg(args), url: stringAt(objectArg(args), 'torrent_url') }));
+    return deps.qbit.add(qbitAddOptions(args));
   });
   const qbitList = (args: unknown) => structured(async () => {
     await requireNetworkGuard(config, deps.vpnStatusProvider, 'torrent_list');
@@ -91,10 +99,16 @@ export function createTorrentToolHandlers(config: AppConfig, deps: TorrentDeps):
   const qbitDelete = (args: unknown) => structured(async () => {
     await requireNetworkGuard(config, deps.vpnStatusProvider, 'torrent_delete');
     const input = objectArg(args);
+    if (input.delete_files !== undefined && input.deleteFiles !== undefined) throw new McpError('INVALID_ARGUMENT', 'Supply only one delete-files option');
     return deps.qbit.delete(hashesArg(args), Boolean(input.delete_files ?? input.deleteFiles));
   });
 
   const handlers: Record<string, ToolHandler> = {
+    p2p_doctor: () => structured(async () => {
+      const [report, integrations] = await Promise.all([createDoctorReport(config, deps), config.integrations === undefined ? Promise.resolve(undefined) : registry.diagnose()]);
+      if (!integrations) return report;
+      return { ...report, status: report.status === 'checks_passed' && integrations.some((item) => !['healthy', 'disabled'].includes(item.state)) ? 'attention_needed' : report.status, integrations };
+    }),
     jackett_test_connection: () => structured(() => deps.jackett.testConnection()),
     jackett_search: jackettSearch,
     jackett_caps: jackettCaps,
@@ -120,11 +134,40 @@ export function createTorrentToolHandlers(config: AppConfig, deps: TorrentDeps):
     torrent_delete: qbitDelete
   };
 
-  return Object.fromEntries(Object.entries(handlers).map(([name, handler]) => [name, async (args: unknown) => {
-    const parsed = z.object(toolSpecs[name].inputSchema).safeParse(args ?? {});
-    if (!parsed.success) return { ok: false, error: { code: 'INVALID_ARGUMENT', message: 'Invalid tool argument' } };
+  if (ranker) {
+    handlers.jev_rank = (args) => structured(async () => {
+      const input = objectArg(args);
+      return ranker.rank(input.query as string, input.candidates as RankCandidate[], input.preferences as string[] | undefined);
+    });
+    if (registry.handlers.slskd_results) {
+      handlers.slskd_rank = async (args) => {
+        const input = objectArg(args);
+        const found = await registry.handlers.slskd_results({ search_id: input.search_id, limit: input.limit, filters: input.filters });
+        if (!found.ok) return found;
+        return structured(async () => {
+          const result = found.data as { search_query?: string; files: Array<Omit<RankCandidate, 'id' | 'size_bytes'> & { file_id: string; title: string; size: number; username: string }> };
+          const files = result.files;
+          if (!files.length) return { search_id: input.search_id, recommendation: null, ranked: [], note: 'No files were returned for this search.' };
+          const query = input.query ?? result.search_query;
+          if (typeof query !== 'string' || !query) throw new McpError('INVALID_ARGUMENT', 'Search query is unavailable; supply query explicitly');
+          const preferredUsers = new Set((input.preferred_users as string[] | undefined)?.map((user) => user.toLowerCase()) ?? []);
+          const ranked = await ranker.rank(query, files.map(({ file_id, username, title, size, ...metadata }) => ({
+            id: file_id, title, size_bytes: size, ...metadata,
+            ...(preferredUsers.size ? { preferred_source: preferredUsers.has(username.toLowerCase()) } : {})
+          })), input.preferences as string[] | undefined);
+          return { search_id: input.search_id, ...ranked, ranked: ranked.ranked.map((item) => ({ ...item, file_id: item.id, username: files.find((file) => file.file_id === item.id)?.username })) };
+        });
+      };
+    }
+  }
+
+  const validated = Object.fromEntries(Object.entries(handlers).map(([name, handler]) => [name, async (args: unknown): Promise<ToolResult> => {
+    const parsed = z.strictObject(toolSpecs[name].inputSchema).safeParse(args ?? {});
+    if (!parsed.success) return { ok: false, error: publicDiagnostic(validationError(parsed.error, schemaGuidance(toolSpecs[name].inputSchema)), 'Invalid tool argument') };
     return handler(parsed.data);
   }]));
+  registry.setJackettSearch(validated.jackett_search);
+  return { ...registry.handlers, ...validated, p2p_setup_status: () => structured(() => setupStatus(config, registry.handlers)), ...musicHandlers() };
 }
 
 const searchShape = {
@@ -134,32 +177,50 @@ const searchShape = {
   categories: z.array(z.number().int()).optional(),
   season: z.number().int().positive().optional(),
   episode: z.string().optional(),
-  imdb_id: z.string().regex(/^tt\d+$/).optional(),
+  imdb_id: z.string().regex(/^tt\d+$/).optional().describe('Use an IMDb identifier beginning with tt followed by digits.'),
   limit: z.number().int().min(1).max(100).default(25),
   offset: z.number().int().min(0).default(0)
 };
 const addShape = {
-  url: z.string().optional(), urls: z.array(z.string()).optional(), magnet_uri: z.string().optional(), torrent_url: z.string().optional(),
+  url: torrentSource.optional(), urls: z.array(torrentSource).min(1).optional(), magnet_uri: torrentMagnet.optional(), torrent_url: torrentHttpUrl.optional(),
   savepath: z.string().optional(), save_path: z.string().optional(), category: z.string().optional(), tags: z.array(z.string()).optional(),
   paused: z.boolean().optional(), skipChecking: z.boolean().optional(), skip_checking: z.boolean().optional()
 };
-const hashesShape = { hash: z.string().optional(), hashes: z.array(z.string()).optional() };
-const torrentHttpUrl = z.url().refine((value) => {
-  const url = new URL(value);
-  return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password;
+const hashesShape = { hash: torrentHash.optional(), hashes: z.array(torrentHash).min(1).optional() };
+const preferenceShape = z.array(z.string().trim().min(1).max(128)).max(15).optional();
+const rankCandidateShape = z.strictObject({
+  id: z.string().min(1).max(128), title: z.string().min(1).max(256), size_bytes: z.number().int().nonnegative().optional(),
+  folder_name: z.string().max(128).optional(), extension: z.string().max(12).optional(),
+  bitrate_kbps: z.number().int().nonnegative().optional(), duration_seconds: z.number().int().nonnegative().optional(),
+  sample_rate_hz: z.number().int().nonnegative().optional(), bit_depth: z.number().int().nonnegative().optional(),
+  vbr: z.boolean().optional(), is_public: z.boolean().optional(), free_upload_slot: z.boolean().optional(),
+  queue_length: z.number().int().nonnegative().optional(), upload_speed_bytes_per_second: z.number().int().nonnegative().optional(),
+  preferred_source: z.boolean().optional(), folder_result_count: z.number().int().nonnegative().optional()
 });
 
 const toolSpecs: Record<string, { description: string; inputSchema: z.ZodRawShape; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean } }> = {
+  ...musicToolSpecs,
+  p2p_setup_status: { description: 'Read Soulseek API and account readiness. If user input is needed, notify the user using the returned message and local credential-entry command; never request passwords in chat.', inputSchema: {}, annotations: { readOnlyHint: true } },
+  jev_rank: { description: 'Rank supplied music metadata and preferences with Jev; never downloads.', inputSchema: {
+    query: z.string().min(1).max(512),
+    candidates: z.array(rankCandidateShape).min(1).max(25), preferences: preferenceShape
+  }, annotations: { readOnlyHint: true } },
+  slskd_rank: { description: 'Filter a Soulseek search page and rank its metadata with Jev; never downloads.', inputSchema: {
+    search_id: z.uuid(), query: z.string().min(1).max(512).optional(), limit: z.number().int().min(1).max(25).default(10),
+    filters: slskdFiltersSchema.optional(), preferences: preferenceShape,
+    preferred_users: z.array(z.string().trim().min(1).max(128)).max(20).optional()
+  }, annotations: { readOnlyHint: true } },
+  p2p_doctor: { description: 'Read-only setup diagnostics for service access and the host VPN guard. Does not verify traffic isolation.', inputSchema: {}, annotations: { readOnlyHint: true } },
   jackett_test_connection: { description: 'Validate Jackett connectivity and API-key access.', inputSchema: {}, annotations: { readOnlyHint: true } },
   jackett_search: { description: 'Search Jackett using typed Torznab modes and normalized results.', inputSchema: searchShape, annotations: { readOnlyHint: true } },
   jackett_caps: { description: 'Read normalized Torznab capabilities.', inputSchema: { indexer: z.string().optional() }, annotations: { readOnlyHint: true } },
   jackett_list_indexers: { description: 'List configured Jackett indexers.', inputSchema: {}, annotations: { readOnlyHint: true } },
   jackett_get_category: { description: 'Resolve user-facing category names to Torznab IDs.', inputSchema: { query: z.string().min(1) }, annotations: { readOnlyHint: true } },
   qbittorrent_test_connection: { description: 'Validate qBittorrent authentication and report its version.', inputSchema: {}, annotations: { readOnlyHint: true } },
-  qbittorrent_add_magnet: { description: 'Add a magnet URI to qBittorrent.', inputSchema: { magnet_uri: z.string().startsWith('magnet:'), save_path: z.string().optional(), category: z.string().optional(), tags: z.array(z.string()).optional(), paused: z.boolean().optional(), skip_checking: z.boolean().optional() } },
+  qbittorrent_add_magnet: { description: 'Submit a BTIH magnet to qBittorrent; success means acceptance, not completed download.', inputSchema: { magnet_uri: torrentMagnet, save_path: z.string().optional(), category: z.string().optional(), tags: z.array(z.string()).optional(), paused: z.boolean().optional(), skip_checking: z.boolean().optional() } },
   qbittorrent_add_torrent_url: { description: 'Add an HTTP(S) torrent URL to qBittorrent.', inputSchema: { torrent_url: torrentHttpUrl, save_path: z.string().optional(), category: z.string().optional(), tags: z.array(z.string()).optional(), paused: z.boolean().optional(), skip_checking: z.boolean().optional() } },
-  qbittorrent_list_torrents: { description: 'List normalized torrents with filtering and sorting.', inputSchema: { filter: z.string().optional(), category: z.string().optional(), tag: z.string().optional(), sort_by: z.string().optional(), limit: z.number().int().min(1).max(1000).optional() }, annotations: { readOnlyHint: true } },
-  qbittorrent_get_torrent: { description: 'Get normalized torrent details by hash.', inputSchema: { hash: z.string().min(1) }, annotations: { readOnlyHint: true } },
+  qbittorrent_list_torrents: { description: 'List normalized torrents with filtering and sorting.', inputSchema: { filter: z.enum(['all', 'downloading', 'completed', 'paused', 'active', 'inactive']).optional(), category: z.string().optional(), tag: z.string().optional(), sort_by: z.enum(['added_on', 'progress', 'dlspeed', 'upspeed', 'eta', 'name']).optional(), limit: z.number().int().min(1).max(1000).optional() }, annotations: { readOnlyHint: true } },
+  qbittorrent_get_torrent: { description: 'Get normalized torrent details by hash.', inputSchema: { hash: torrentHash }, annotations: { readOnlyHint: true } },
   qbittorrent_pause_torrent: { description: 'Pause one or more torrents.', inputSchema: hashesShape, annotations: { idempotentHint: true } },
   qbittorrent_resume_torrent: { description: 'Resume one or more torrents.', inputSchema: hashesShape, annotations: { idempotentHint: true } },
   qbittorrent_delete_torrent: { description: 'Delete torrents; files are kept unless delete_files is true.', inputSchema: { ...hashesShape, delete_files: z.boolean().default(false) }, annotations: { destructiveHint: true } }
@@ -177,10 +238,11 @@ toolSpecs.torrent_delete = { ...toolSpecs.torrent_delete, inputSchema: { ...hash
 
 export function createTorrentServer(config: AppConfig, deps: TorrentDeps = createDefaultTorrentDeps(config)): McpServer {
   const server = new McpServer({ name: 'torrent-mcp', version: PACKAGE_VERSION });
-  const handlers = createTorrentToolHandlers(config, deps);
+  const registry = createIntegrationRegistry(config, deps.vpnStatusProvider);
+  const handlers = createTorrentToolHandlers(config, deps, registry);
   for (const [name, handler] of Object.entries(handlers)) {
-    const spec = toolSpecs[name];
-    server.registerTool(name, spec, async (args: unknown) => mcpJsonContent(await handler(args)));
+    const spec = toolSpecs[name] ?? registry.specs[name];
+    server.registerTool(name, { ...spec, inputSchema: z.strictObject(spec.inputSchema) }, async (args: unknown) => mcpJsonContent(await handler(args)));
   }
   return server;
 }
@@ -201,7 +263,12 @@ function publicErrorMessage(code: string): string {
     TORZNAB_PARSE_ERROR: 'Jackett returned an invalid Torznab response',
     QBIT_LOGIN_FAILED: 'qBittorrent rejected the configured credentials',
     QBIT_UNREACHABLE: 'Could not reach the configured qBittorrent service',
-    QBIT_REQUEST_FAILED: 'qBittorrent request failed'
+    QBIT_REQUEST_FAILED: 'qBittorrent request failed',
+    JEV_KEY_UNAVAILABLE: 'Configured Jev key file is unavailable',
+    JEV_AUTH_FAILED: 'Jev rejected the configured API key',
+    JEV_TIMEOUT: 'Jev ranking timed out',
+    JEV_REQUEST_FAILED: 'Jev ranking request failed',
+    JEV_INVALID_RESPONSE: 'Jev returned an invalid ranking'
   };
   return messages[code] ?? 'The tool operation failed';
 }
@@ -217,7 +284,13 @@ function optionalStringAt(input: Record<string, unknown>, key: string): string |
 function optionalNumberAt(input: Record<string, unknown>, key: string): number | undefined { const value = input[key]; return typeof value === 'number' && Number.isFinite(value) ? value : undefined; }
 function optionalStringArrayAt(input: Record<string, unknown>, key: string): string[] | undefined { const value = input[key]; return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && Boolean(item)) : undefined; }
 function optionalNumberArrayAt(input: Record<string, unknown>, key: string): number[] | undefined { const value = input[key]; return Array.isArray(value) ? value.filter((item): item is number => typeof item === 'number' && Number.isInteger(item)) : undefined; }
-function hashesArg(args: unknown): string[] { const input = objectArg(args); const hashes = optionalStringArrayAt(input, 'hashes') ?? (typeof input.hash === 'string' ? [input.hash] : undefined); if (!hashes?.length) throw new McpError('INVALID_ARGUMENT', 'hash or hashes is required'); return hashes; }
+function hashesArg(args: unknown): string[] {
+  const input = objectArg(args);
+  if (input.hash !== undefined && input.hashes !== undefined) throw invalidArgument('hash', 'Supply either hash or hashes, not both.');
+  const hashes = optionalStringArrayAt(input, 'hashes') ?? (typeof input.hash === 'string' ? [input.hash] : undefined);
+  if (!hashes?.length) throw invalidArgument('hash', 'Supply hash or a nonempty hashes list.');
+  return [...new Set(hashes.map((hash) => hash.toLowerCase()))];
+}
 function qbitListOptions(args: unknown): QbitListOptions {
   const input = objectArg(args);
   const filter = optionalStringAt(input, 'filter');
@@ -226,10 +299,13 @@ function qbitListOptions(args: unknown): QbitListOptions {
   if (filter && !['all', 'downloading', 'completed', 'paused', 'active', 'inactive'].includes(filter)) throw new McpError('INVALID_ARGUMENT', 'invalid qBittorrent filter');
   if (sort && !['added_on', 'progress', 'dlspeed', 'upspeed', 'eta', 'name'].includes(sort)) throw new McpError('INVALID_ARGUMENT', 'invalid qBittorrent sort_by');
   if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 1000)) throw new McpError('INVALID_ARGUMENT', 'limit must be an integer between 1 and 1000');
-  return { filter, category: optionalStringAt(input, 'category'), tag: optionalStringAt(input, 'tag'), sort, limit };
+  return { filter, category: input.category as string | undefined, tag: input.tag as string | undefined, sort, limit };
 }
 function qbitAddOptions(args: unknown): QbitAddOptions {
   const input = objectArg(args);
+  if (input.savepath !== undefined && input.save_path !== undefined) throw invalidArgument('save_path', 'Supply only one of save_path or savepath.');
+  if (input.skipChecking !== undefined && input.skip_checking !== undefined) throw invalidArgument('skip_checking', 'Supply only one of skip_checking or skipChecking.');
+  if (['url', 'urls', 'magnet_uri', 'torrent_url'].filter((key) => input[key] !== undefined).length !== 1) throw invalidArgument('url', 'Supply exactly one of url, urls, magnet_uri, or torrent_url.');
   const single = optionalStringAt(input, 'url') ?? optionalStringAt(input, 'magnet_uri') ?? optionalStringAt(input, 'torrent_url');
   const urls = optionalStringArrayAt(input, 'urls') ?? (single ? [single] : undefined);
   if (!urls?.length) throw new McpError('INVALID_ARGUMENT', 'url, urls, magnet_uri, or torrent_url is required');

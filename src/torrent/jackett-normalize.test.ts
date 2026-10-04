@@ -6,7 +6,7 @@ describe('Jackett normalization', () => {
     const xml = `<?xml version="1.0"?><rss><channel>
       <item>
         <title>Ubuntu ISO</title>
-        <link>magnet:?xt=urn:btih:abc</link>
+        <link>magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567</link>
         <guid>https://example.test/t/1</guid>
         <pubDate>Sat, 01 Jan 2000 12:00:00 GMT</pubDate>
         <size>12345</size>
@@ -20,7 +20,7 @@ describe('Jackett normalization', () => {
 
     expect(normalizeJackettSearch(xml)[0]).toMatchObject({
       title: 'Ubuntu ISO',
-      magnet_uri: 'magnet:?xt=urn:btih:abc',
+      magnet_uri: 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567',
       publish_date: '2000-01-01T12:00:00.000Z',
       size_bytes: 12345,
       categories: [8000],
@@ -44,9 +44,9 @@ describe('Jackett normalization', () => {
   });
 
   it('strips tracker URLs and passkeys from returned magnet links', () => {
-    const xml = `<rss><channel><item><title>Safe</title><link>magnet:?xt=urn:btih:abc&amp;tr=https%3A%2F%2Ftracker.test%2Fprivate-passkey</link></item></channel></rss>`;
+    const xml = `<rss><channel><item><title>Safe</title><link>magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&amp;tr=https%3A%2F%2Ftracker.test%2Fprivate-passkey</link></item></channel></rss>`;
 
-    expect(normalizeJackettSearch(xml)[0].magnet_uri).toBe('magnet:?xt=urn:btih:abc');
+    expect(normalizeJackettSearch(xml)[0].magnet_uri).toBe('magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567');
   });
 
   it('rejects malformed XML instead of attempting regex recovery', () => {

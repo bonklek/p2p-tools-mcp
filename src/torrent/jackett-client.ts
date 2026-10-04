@@ -111,7 +111,7 @@ export class JackettClient {
     try {
       const url = new URL(`${this.baseUrl}${path}`);
       url.search = params.toString();
-      const response = await this.fetchImpl(url.toString(), { signal: controller.signal });
+      const response = await this.fetchImpl(url.toString(), { signal: controller.signal, redirect: 'error' });
       const text = await response.text();
       if (response.status === 401 || response.status === 403) {
         throw new McpError('JACKETT_AUTH_FAILED', 'Jackett rejected the configured API key', { status: response.status });

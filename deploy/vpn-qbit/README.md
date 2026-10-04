@@ -15,7 +15,7 @@ Goal:
 
 ## Requirements
 
-- Docker + Docker Compose plugin
+- Docker + Docker Compose plugin 2.17 or newer (dependency restart propagation)
 - NordVPN service credentials for the VPN container
 - A local download directory
 
@@ -35,6 +35,7 @@ docker compose --env-file .env up -d
 On Windows PowerShell:
 
 ```powershell
+Set-Location deploy/vpn-qbit
 Copy-Item .env.example .env
 Copy-Item config.yaml config.local.yaml
 docker compose --env-file .env up -d
@@ -84,6 +85,16 @@ The container stack itself is what enforces torrent-side VPN isolation here.
 The Compose images are pinned by digest. Refresh those digests deliberately as
 part of dependency maintenance, review upstream release notes, and do not switch
 them back to floating tags such as `latest`.
+
+## Recovery and verification
+
+Gluetun's internal tunnel recovery and a whole-container restart are different events. The dependency `restart: true` settings propagate explicit Compose operations; they do not promise recovery after every automatic runtime crash or namespace replacement. See [Docker startup/restart ordering](https://docs.docker.com/compose/how-tos/startup-order/) and [Gluetun health behavior](https://github.com/qdm12/gluetun-wiki/blob/main/faq/healthcheck.md).
+
+If APIs remain unreachable after a VPN-container restart, inspect health and logs, then deliberately recreate the three-service stack together using `docker compose --env-file .env up -d --force-recreate`. This interrupts active service operations; the configured bind mounts retain their data. Confirm API reachability and VPN egress before resuming work. A healthy container alone does not demonstrate correct egress or leak protection.
+
+The default `data/` directory contains service configuration and downloads and is ignored by Git. Keep any custom runtime paths out of source exports as well. Do not copy the deployment folder wholesale into a publication artifact.
+
+The [local validation record](../../docs/validation.md) does not claim a live container test. Deployment acceptance requires separate checks for startup, internal tunnel recovery, explicit Compose restart, runtime crash, and namespace replacement, including API availability and egress after each event.
 
 ## Troubleshooting
 

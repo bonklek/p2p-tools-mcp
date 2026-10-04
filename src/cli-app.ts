@@ -4,6 +4,13 @@ import type { ToolResult } from './shared/tool-result.js';
 import { PACKAGE_VERSION } from './shared/version.js';
 import { createDefaultTorrentDeps, createTorrentToolHandlers } from './torrent/server.js';
 import { createVpnToolHandlers } from './vpn/server.js';
+import { McpError } from './shared/errors.js';
+import { publicDiagnostic, requiredSchemaFields } from './shared/diagnostics.js';
+import type { DoctorReport } from './doctor.js';
+import { integrationOperations } from './integrations/registry.js';
+import { runSlskdBulk, type BulkOptions } from './bulk/slskd-bulk.js';
+import { collectCredentials } from './setup.js';
+import { runMusicCli } from './music/workflow.js';
 
 export const CLI_VERSION = PACKAGE_VERSION;
 
@@ -44,6 +51,12 @@ const stringsOption = (key: string): OptionSpec => ({ key, kind: 'strings' });
 const numbersOption = (key: string): OptionSpec => ({ key, kind: 'numbers' });
 
 const COMMANDS: Record<string, CommandSpec> = {
+  'setup status': { tool: 'p2p_setup_status', summary: 'Check Soulseek setup and return a safe user credential-entry path.' },
+  'jev rank': { tool: 'jev_rank', summary: 'Rank supplied music candidates and preferences with Jev without downloading.', options: { query: stringOption('query') }, required: ['query', 'candidates'], stdinKeys: ['candidates', 'preferences'] },
+  'slskd rank': { tool: 'slskd_rank', summary: 'Filter and rank an existing Soulseek search with Jev.', options: { query: stringOption('query'), 'search-id': stringOption('search_id'), limit: numberOption('limit') }, required: ['search_id'], stdinKeys: ['filters', 'preferences', 'preferred_users'] },
+  'basket integrations': { tool: 'p2p_integrations', summary: 'List optional integration configuration states.' },
+  'basket search': { tool: 'p2p_search', summary: 'Search configured providers and preserve partial or pending outcomes.', options: { query: stringOption('query'), providers: stringsOption('providers'), limit: numberOption('limit') }, required: ['query'] },
+  doctor: { tool: 'p2p_doctor', summary: 'Check configuration, service access, and host VPN guard readiness (read-only).' },
   'vpn status': { tool: 'vpn_status', summary: 'Return VPN connection status.' },
   'vpn connect': { tool: 'vpn_connect', summary: 'Connect the VPN.', options: { country: stringOption('country') } },
   'vpn disconnect': { tool: 'vpn_disconnect', summary: 'Disconnect the VPN.' },
@@ -108,11 +121,34 @@ const COMMANDS: Record<string, CommandSpec> = {
   }
 };
 
+// Shared adapter metadata supplies both MCP schemas and CLI command discovery.
+for (const operation of integrationOperations) {
+  const privateFields = ['source', 'folder', 'device', 'username', 'filters'];
+  const options = Object.fromEntries(Object.keys(operation.schema).filter((key) => !privateFields.includes(key)).map((key) => {
+    const spec = ['limit', 'offset', 'page', 'max_bytes', 'indexer_id'].includes(key) ? numberOption(key)
+      : ['paused', 'delete_files'].includes(key) ? booleanOption(key)
+      : key === 'indexer_ids' ? numbersOption(key)
+      : ['hashes', 'file_ids'].includes(key) ? stringsOption(key) : stringOption(key);
+    return [key.replaceAll('_', '-'), spec];
+  }));
+  COMMANDS[`${operation.service.replaceAll('_', '-')} ${operation.action.replaceAll('_', '-')}`] = {
+    tool: `${operation.service}_${operation.action}`, summary: operation.description, options,
+    required: requiredSchemaFields(operation.schema),
+    stdinKeys: Object.keys(operation.schema).filter((key) => privateFields.includes(key)), requiresConfirmation: operation.destructive
+  };
+}
+
 export async function runCli(argv: string[], runtime: CliRuntime = {}): Promise<number> {
   const stdout = runtime.stdout ?? ((text) => process.stdout.write(text));
   const stderr = runtime.stderr ?? ((text) => process.stderr.write(text));
 
   try {
+    if (argv[0] === 'music') return await runMusicCli(argv.slice(1), runtime.env ?? process.env, stdout, stderr);
+    if (argv[0] === 'setup' && argv[1] === 'credentials') {
+      if (argv.length === 3 && argv[2] === '--help') { stdout('Usage: p2p-tools setup credentials\nEnter local slskd access in a hidden interactive prompt. No sensitive arguments are accepted.\n'); return 0; }
+      if (argv.length !== 2) throw new CliUsageError('setup credentials accepts no secret arguments; run it in a local terminal');
+      await collectCredentials(runtime.env ?? process.env); return 0;
+    }
     if (!argv.length || argv[0] === '--help' || argv[0] === 'help') {
       stdout(helpText());
       return 0;
@@ -121,14 +157,40 @@ export async function runCli(argv: string[], runtime: CliRuntime = {}): Promise<
       stdout(`${CLI_VERSION}\n`);
       return 0;
     }
+    if (argv[0] === 'slskd' && argv[1] === 'bulk') {
+      if (argv.length === 3 && argv[2] === '--help') {
+        stdout('Usage: p2p-tools slskd bulk --manifest <path> [--state <path>] [--approvals <path>] [--plan] [--download] [--retry-errors] [--max-items <n>] [--download-budget-bytes <n>] [--progress]\nSearch and select locally; --download explicitly queues selections. State resumes safely.\n');
+        return 0;
+      }
+      const options = parseBulkOptions(argv.slice(2));
+      if (argv.includes('--progress')) options.onProgress = (processed, total) => writeJson(stderr, { processed, total }, true);
+      try {
+        const handlers = options.plan ? {} : (runtime.torrentHandlers ?? defaultTorrentHandlers)((runtime.loadConfig ?? loadConfigFromEnv)(runtime.env ?? process.env));
+        const result = await runSlskdBulk(options, handlers);
+        writeJson(stdout, { ok: true, data: result }, true);
+        const counts = result.counts as Record<string, number> | undefined;
+        return (counts?.error ?? 0) || (counts?.download_intent ?? 0) || result.stopped_reason ? 1 : 0;
+      } catch (error) {
+        writeJson(stderr, { ok: false, error: { code: 'BULK_ERROR', message: publicBulkError(error) } }, true);
+        return 2;
+      }
+    }
+    if ((argv.length === 3 && argv[2] === '--help') || (argv.length === 2 && argv[0] === 'doctor' && argv[1] === '--help')) {
+      const key = argv[0] === 'doctor' ? 'doctor' : `${argv[0] === 'qbit' ? 'qbittorrent' : argv[0]} ${argv[1]}`;
+      if (!COMMANDS[key]) throw new CliUsageError('Unknown command; run p2p-tools --help');
+      stdout(commandHelp(key, COMMANDS[key]));
+      return 0;
+    }
 
     const parsed = await parseInvocation(argv, runtime.readStdin ?? defaultReadStdin);
     const env = runtime.env ?? process.env;
     let config: AppConfig;
     try {
       config = (runtime.loadConfig ?? loadConfigFromEnv)(env);
-    } catch {
-      writeJson(stderr, cliError('CONFIG_ERROR', 'CLI configuration failed'), parsed.compact);
+    } catch (error) {
+      const diagnostic = error instanceof McpError && ['CONFIG_INVALID', 'CONFIG_NOT_FOUND', 'CONFIG_UNREADABLE'].includes(error.code)
+        ? { ok: false, error: publicDiagnostic(error, 'CLI configuration failed') } : cliError('CONFIG_ERROR', 'CLI configuration failed');
+      writeJson(stderr, diagnostic, parsed.compact);
       return 2;
     }
 
@@ -138,13 +200,15 @@ export async function runCli(argv: string[], runtime: CliRuntime = {}): Promise<
     };
     const handler = handlers[parsed.command.tool];
     if (!handler) {
-      writeJson(stderr, cliError('CLI_ERROR', 'CLI command is unavailable'), parsed.compact);
+      writeJson(stderr, { ok: false, error: { code: 'INTEGRATION_UNAVAILABLE', message: 'This command is disabled or misconfigured.', next_action: 'Enable and configure the integration in the integrations section, then rerun doctor.' } }, parsed.compact);
       return 1;
     }
 
     const result = await handler(parsed.args);
     writeJson(stdout, result, parsed.compact);
-    return result.ok ? 0 : 1;
+    if (result.ok && parsed.command.tool === 'p2p_doctor') return (result.data as DoctorReport).status === 'blocked' ? 1 : 0;
+    if (result.ok && result.data && typeof result.data === 'object' && (['failed', 'partial'].includes(String((result.data as { outcome?: unknown }).outcome)) || ['failed', 'partial'].includes(String((result.data as { status?: unknown }).status)))) return 1;
+    return result.ok ? 0 : result.error.code === 'INVALID_ARGUMENT' ? 2 : 1;
   } catch (error) {
     if (error instanceof CliUsageError) {
       writeJson(stderr, cliError('CLI_USAGE', error.message), false);
@@ -154,9 +218,51 @@ export async function runCli(argv: string[], runtime: CliRuntime = {}): Promise<
     return 1;
   }
 }
-
 function defaultTorrentHandlers(config: AppConfig): Record<string, ToolHandler> {
   return createTorrentToolHandlers(config, createDefaultTorrentDeps(config));
+}
+
+function parseBulkOptions(argv: string[]): BulkOptions {
+  let manifestPath: string | undefined;
+  let statePath: string | undefined;
+  let approvalsPath: string | undefined;
+  let plan = false;
+  let download = false;
+  let retryErrors = false;
+  let maxItems: number | undefined;
+  let downloadBudgetBytes: number | undefined;
+  for (let index = 0; index < argv.length; index++) {
+    const token = argv[index];
+    if (token === '--plan') plan = true;
+    else if (token === '--download') download = true;
+    else if (token === '--retry-errors') retryErrors = true;
+    else if (token === '--progress') continue;
+    else if (token === '--manifest' || token === '--state' || token === '--approvals' || token === '--max-items' || token === '--download-budget-bytes') {
+      const value = argv[++index];
+      if (!value || value.startsWith('--')) throw new CliUsageError(`Missing value for ${token}`);
+      if (token === '--manifest') manifestPath = value;
+      else if (token === '--state') statePath = value;
+      else if (token === '--approvals') approvalsPath = value;
+      else if(token === '--download-budget-bytes') { downloadBudgetBytes=Number(value);if(!Number.isSafeInteger(downloadBudgetBytes)||downloadBudgetBytes<0)throw new CliUsageError('--download-budget-bytes must be a nonnegative integer'); }
+      else { maxItems = Number(value); if (!Number.isSafeInteger(maxItems) || maxItems < 1) throw new CliUsageError('--max-items must be a positive integer'); }
+    } else throw new CliUsageError('Unknown bulk option');
+  }
+  if (!manifestPath) throw new CliUsageError('--manifest is required');
+  if (plan && download) throw new CliUsageError('--plan and --download cannot be combined');
+  return { manifestPath, statePath: statePath ?? `${manifestPath}.state.json`, approvalsPath, plan, download, retryErrors, maxItems, downloadBudgetBytes };
+}
+
+function publicBulkError(error: unknown): string {
+  const safe = new Set([
+    'Manifest and state paths must differ', 'Track IDs must be unique', 'Approval IDs must be unique',
+    'Approval contains an unknown track ID', 'Combined preferences cannot exceed 15 per track',
+    'State does not match this manifest', 'Batch state is locked by another run',
+    'slskd search and results must be configured', 'slskd download and batch inspection must be configured',
+    'Jev must be configured for auto_select_jev'
+  ]);
+  if (error instanceof Error && safe.has(error.message)) return error.message;
+  if (error instanceof Error && error.message.startsWith('Approval for ')) return 'An approval does not match a saved public candidate';
+  return 'Check the manifest, approvals, state path, and integration configuration';
 }
 
 interface ParsedInvocation {
@@ -166,11 +272,12 @@ interface ParsedInvocation {
 }
 
 async function parseInvocation(argv: string[], readStdin: () => Promise<string>): Promise<ParsedInvocation> {
-  if (argv.length < 2 || argv[0].startsWith('-') || argv[1].startsWith('-')) {
+  const doctor = argv[0] === 'doctor';
+  if (!doctor && (argv.length < 2 || argv[0].startsWith('-') || argv[1].startsWith('-'))) {
     throw new CliUsageError('Expected a command group and action; run p2p-tools --help');
   }
   const domain = argv[0] === 'qbit' ? 'qbittorrent' : argv[0];
-  const key = `${domain} ${argv[1]}`;
+  const key = doctor ? 'doctor' : `${domain} ${argv[1]}`;
   const command = COMMANDS[key];
   if (!command) throw new CliUsageError('Unknown command; run p2p-tools --help');
 
@@ -180,12 +287,15 @@ async function parseInvocation(argv: string[], readStdin: () => Promise<string>)
   let confirmed = false;
   const options = command.options ?? {};
 
-  for (let index = 2; index < argv.length; index += 1) {
+  for (let index = doctor ? 1 : 2; index < argv.length; index += 1) {
     const token = argv[index];
     if (token === '--compact') { compact = true; continue; }
-    if (token === '--stdin') { stdin = true; continue; }
+    if (token === '--stdin') {
+      if (doctor) throw new CliUsageError('doctor accepts --compact or --help; it does not read standard input');
+      stdin = true; continue;
+    }
     if (token === '--yes') {
-      if (!command.requiresConfirmation) throw new CliUsageError('--yes is only valid for qbittorrent delete');
+      if (!command.requiresConfirmation) throw new CliUsageError('--yes is only valid for commands requiring destructive-action confirmation');
       confirmed = true;
       continue;
     }
@@ -221,10 +331,10 @@ async function parseInvocation(argv: string[], readStdin: () => Promise<string>)
   args = { ...args, ...values };
 
   for (const required of command.required ?? []) {
-    if (args[required] === undefined || args[required] === '') throw new CliUsageError('A required option is missing');
+    if (args[required] === undefined || args[required] === '') throw new CliUsageError(`Required field ${required} is missing; run p2p-tools ${key} --help`);
   }
   for (const group of command.oneOf ?? []) {
-    if (!group.some((name) => hasValue(args[name]))) throw new CliUsageError('A required option is missing');
+    if (!group.some((name) => hasValue(args[name]))) throw new CliUsageError(`Supply ${group.join(' or ')}; run p2p-tools ${key} --help`);
   }
   if (command.requiresConfirmation && !confirmed) {
     throw new CliUsageError('This command requires --yes');
@@ -271,9 +381,22 @@ async function defaultReadStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+function commandHelp(key: string, command: CommandSpec): string {
+  if (key === 'doctor') return 'Usage: p2p-tools doctor [--compact]\nRead-only checks: configuration, Jackett access and indexers, qBittorrent access and API family, host VPN guard, and configured optional integrations.\nOptional failures are reported separately; other integrations remain usable.\nTraffic isolation is not verified. No searches or torrent or VPN changes are made.\nExit codes: 0 = checks passed or warnings only; 1 = blocked core check; 2 = configuration or usage error.\n';
+  const options = Object.entries(command.options ?? {}).map(([name, spec]) =>
+    `  --${name}${spec.kind === 'boolean' ? '[=true|false]' : ' <value>'}  JSON field: ${spec.key}`
+  );
+  const stdinKeys = command.stdinKeys?.length ? `\nAdditional JSON fields via --stdin: ${command.stdinKeys.join(', ')}\n` : '';
+  const required = command.required?.length ? `Required fields: ${command.required.join(', ')}\n` : '';
+  const target = command.oneOf?.length ? `Supply one of: ${command.oneOf.map((group) => group.join(' or ')).join('; ')}\n` : '';
+  const confirmation = command.requiresConfirmation ? command.tool.endsWith('delete') || command.tool === 'qbittorrent_delete_torrent'
+    ? 'Requires --yes; downloaded files are retained unless delete_files is true.\n' : 'Requires --yes to change content retention.\n' : '';
+  return `Usage: p2p-tools ${key} [options]\n${command.summary}\n\n${options.join('\n')}\n${stdinKeys}${required}${target}${confirmation}\nUse --stdin for one JSON object, --compact for one-line output.\n`;
+}
+
 export function helpText(): string {
   const commands = Object.entries(COMMANDS)
     .map(([name, command]) => `  ${name.padEnd(27)} ${command.summary}`)
     .join('\n');
-  return `p2p-tools ${CLI_VERSION}\n\nUsage:\n  p2p-tools <group> <action> [options]\n\nCommands:\n${commands}\n\nGlobal options:\n  --stdin     Merge a JSON object from standard input into command arguments.\n  --compact   Print compact one-line JSON.\n  --yes       Confirm qbittorrent delete.\n  --help      Show this help.\n  --version   Show the version.\n\nConfiguration:\n  Set P2P_TOOLS_CONFIG to the YAML configuration path. Existing environment\n  overrides documented in docs/user-guide.md are also supported.\n`;
+  return `p2p-tools ${CLI_VERSION}\n\nUsage:\n  p2p-tools <group> <action> [options]\n\nCommands:\n  slskd bulk                 Process a resumable song manifest with compact output.\n  setup credentials          Collect service access in a hidden local prompt.\n  music <action>             Plan, start, run, inspect, or pause Android delivery.\n${commands}\n\nGlobal options:\n  --stdin     Merge a JSON object from standard input into command arguments.\n  --compact   Print compact one-line JSON.\n  --yes       Confirm a destructive command such as delete or pin-remove.\n  --help      Show this help.\n  --version   Show the version.\n\nConfiguration:\n  Set P2P_TOOLS_CONFIG to the YAML configuration path. Existing environment\n  overrides documented in docs/user-guide.md are also supported.\n`;
 }

@@ -31,7 +31,7 @@ Windows, macOS, and Linux are equal deployment targets. Changes that alter local
 Before tagging a release:
 
 1. Update `package.json` version.
-2. Update the shared package/interface version in source if the exposed CLI or MCP interface version changes.
+2. Update the shared package/interface version in source to match every package-version change; the equality is tested.
 3. Ensure README, `examples/config.yaml`, the CLI Guide, User Guide, Hermes wiring, migration guide, and this file match package scripts, binaries, schemas, and defaults.
 4. Run `npm test`.
 5. Run `npm run check` and `npm run build`.

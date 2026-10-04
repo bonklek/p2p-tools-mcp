@@ -1,5 +1,6 @@
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { McpError } from '../shared/errors.js';
+import { magnetHash } from './validation.js';
 
 interface RawAttr { '@_name'?: string; '@_value'?: string }
 interface RawEnclosure { '@_url'?: string; '@_length'?: string }
@@ -49,10 +50,17 @@ const parser = new XMLParser({
 });
 
 export function normalizeJackettSearch(xml: string, requestedIndexer = 'all'): JackettSearchResult[] {
-  const parsed = parseXml(xml, 'search') as { rss?: { channel?: { item?: RawItem | RawItem[] } } };
-  const rawItems = parsed.rss?.channel?.item;
-  const items = Array.isArray(rawItems) ? rawItems : rawItems ? [rawItems] : [];
-  return items.map((item) => normalizeItem(item, requestedIndexer));
+  const parsed = parseXml(xml, 'search') as { rss?: { channel?: { item?: RawItem | RawItem[] } | '' } };
+  if (!isRecord(parsed.rss) || !('channel' in parsed.rss)
+    || (parsed.rss.channel !== '' && !isRecord(parsed.rss.channel))) {
+    throw new McpError('TORZNAB_PARSE_ERROR', 'Torznab search response did not contain an RSS channel');
+  }
+  const rawItems: unknown = parsed.rss.channel ? parsed.rss.channel.item : undefined;
+  const items = rawItems === undefined ? [] : Array.isArray(rawItems) ? rawItems : [rawItems];
+  return items.map((item) => {
+    if (!isRecord(item)) throw new McpError('TORZNAB_PARSE_ERROR', 'Torznab search returned invalid items');
+    return normalizeItem(item, requestedIndexer);
+  });
 }
 
 export function normalizeJackettCaps(xml: string, indexer = 'all'): JackettCaps {
@@ -65,7 +73,7 @@ export function normalizeJackettCaps(xml: string, indexer = 'all'): JackettCaps 
     }
   };
   const caps = parsed.caps;
-  if (!caps) throw new McpError('TORZNAB_PARSE_ERROR', 'Torznab caps response did not contain a caps root');
+  if (!isRecord(caps)) throw new McpError('TORZNAB_PARSE_ERROR', 'Torznab caps response did not contain a caps object');
   const categories = asArray(caps.categories?.category).map((category) => ({
     id: numberOrZero(category['@_id']),
     name: category['@_name'] ?? '',
@@ -81,10 +89,10 @@ export function normalizeJackettCaps(xml: string, indexer = 'all'): JackettCaps 
     },
     searching: {
       search: available(searching.search),
-      tvsearch: available(searching.tvsearch),
-      movie: available(searching.movie),
-      music: available(searching.music),
-      book: available(searching.book)
+      tvsearch: available(searching['tv-search']),
+      movie: available(searching['movie-search']),
+      music: available(searching['music-search']),
+      book: available(searching['book-search'])
     },
     categories,
     tags: asArray(caps.tags?.tag).map((tag) => tag['@_name'] ?? '').filter(Boolean)
@@ -130,8 +138,14 @@ function parseXml(xml: string, kind: string): unknown {
     throw new McpError('TORZNAB_PARSE_ERROR', `Failed to parse Torznab ${kind} XML`);
   }
   try {
-    return parser.parse(xml);
-  } catch {
+    const parsed = parser.parse(xml);
+    if (parsed && typeof parsed === 'object' && 'error' in parsed) {
+      const code = String(parsed.error?.['@_code'] ?? '');
+      throw new McpError(['100', '101', '102'].includes(code) ? 'JACKETT_AUTH_FAILED' : 'JACKETT_REQUEST_FAILED', 'Jackett returned a Torznab error');
+    }
+    return parsed;
+  } catch (error) {
+    if (error instanceof McpError) throw error;
     throw new McpError('TORZNAB_PARSE_ERROR', `Failed to parse Torznab ${kind} XML`);
   }
 }
@@ -148,15 +162,11 @@ function collectAttrs(raw: RawAttr | RawAttr[] | undefined): Record<string, stri
 }
 
 function asArray<T>(value: T | T[] | undefined): T[] { return Array.isArray(value) ? value : value ? [value] : []; }
+function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 function firstString(values: string[] | undefined): string | null { return values?.[0] ?? null; }
 function safeMagnet(value: string | null): string | null {
-  if (!value?.startsWith('magnet:')) return null;
-  try {
-    const xt = new URL(value).searchParams.get('xt');
-    return xt?.toLowerCase().startsWith('urn:btih:') ? `magnet:?xt=${encodeURIComponent(xt).replace(/%3A/gi, ':')}` : null;
-  } catch {
-    return null;
-  }
+  const xt = value ? magnetHash(value) : null;
+  return xt ? `magnet:?xt=${xt}` : null;
 }
 function firstNumber(values: string[] | undefined): number | null { return numberOrNull(values?.[0]); }
 function numberOrNull(value: unknown): number | null { const parsed = Number(value); return value !== undefined && value !== '' && Number.isFinite(parsed) ? parsed : null; }

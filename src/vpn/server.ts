@@ -5,8 +5,23 @@ import { mcpJsonContent, structuredResult, type ToolResult } from '../shared/too
 import { PACKAGE_VERSION } from '../shared/version.js';
 import { NordVpnClient, requireActiveVpn } from './nordvpn.js';
 import { getPublicIp } from './public-ip.js';
+import { McpError } from '../shared/errors.js';
+import { publicDiagnostic, schemaGuidance, validationError } from '../shared/diagnostics.js';
 
 export type VpnToolHandler = (args: unknown) => Promise<ToolResult>;
+export type VpnClient = Pick<NordVpnClient, 'status' | 'connect' | 'disconnect'>;
+
+async function lifecycleResult(client: VpnClient, connected: boolean) {
+  try {
+    const status = await client.status();
+    if (status.connected !== connected) throw new McpError('VPN_STATE_UNCONFIRMED', 'Requested VPN state has not been observed');
+    return { connected: status.connected, command_accepted: true, state_verified: true };
+  } catch (error) {
+    if (error instanceof McpError && error.code === 'VPN_STATE_UNCONFIRMED') throw error;
+    // The command succeeded; failed/unsupported observation cannot prove state.
+    return { connected: null, command_accepted: true, state_verified: false };
+  }
+}
 
 async function structured(run: () => Promise<unknown>): Promise<ToolResult> {
   return structuredResult(run, publicErrorMessage);
@@ -16,6 +31,8 @@ function publicErrorMessage(code: string): string {
   const messages: Record<string, string> = {
     VPN_COMMAND_FAILED: 'VPN command failed',
     VPN_NOT_ACTIVE: 'VPN is not connected',
+    VPN_STATE_UNCONFIRMED: 'VPN command was accepted but the requested state is not yet confirmed; check status',
+    VPN_STATUS_UNKNOWN: 'VPN status is unrecognized or still changing; check status again',
     VPN_UNSUPPORTED: 'VPN command automation is not supported on this operating system',
     PUBLIC_IP_FAILED: 'Public IP lookup failed'
   };
@@ -24,7 +41,7 @@ function publicErrorMessage(code: string): string {
 
 export function createVpnToolHandlers(
   config: AppConfig,
-  client = new NordVpnClient({ command: config.vpn.command, timeoutMs: config.timeouts.commandMs })
+  client: VpnClient = new NordVpnClient({ command: config.vpn.command, timeoutMs: config.timeouts.commandMs, windowsStatusProvider: config.vpn.windowsStatusProvider })
 ): Record<string, VpnToolHandler> {
   const handlers: Record<string, VpnToolHandler> = {
     vpn_status: () => structured(() => client.status()),
@@ -34,12 +51,12 @@ export function createVpnToolHandlers(
         : config.vpn.defaultCountry;
       return structured(async () => {
         await client.connect(country);
-        return { connected: true };
+        return lifecycleResult(client, true);
       });
     },
     vpn_disconnect: () => structured(async () => {
       await client.disconnect();
-      return { connected: false };
+      return lifecycleResult(client, false);
     }),
     vpn_public_ip: () => structured(() => getPublicIp(config.timeouts.httpMs)),
     vpn_require_active: () => structured(async () => {
@@ -50,8 +67,8 @@ export function createVpnToolHandlers(
   };
 
   return Object.fromEntries(Object.entries(handlers).map(([name, handler]) => [name, async (args: unknown) => {
-    const parsed = z.object(vpnToolSpecs[name].inputSchema).safeParse(args ?? {});
-    if (!parsed.success) return { ok: false, error: { code: 'INVALID_ARGUMENT', message: 'Invalid tool argument' } };
+    const parsed = z.strictObject(vpnToolSpecs[name].inputSchema).safeParse(args ?? {});
+    if (!parsed.success) return { ok: false, error: publicDiagnostic(validationError(parsed.error, schemaGuidance(vpnToolSpecs[name].inputSchema)), 'Invalid tool argument') };
     return handler(parsed.data);
   }]));
 }
@@ -68,12 +85,12 @@ const vpnToolSpecs: Record<string, {
   vpn_require_active: { description: 'Fail unless NordVPN is connected', inputSchema: {}, annotations: { readOnlyHint: true } }
 };
 
-export function createVpnServer(config: AppConfig, client = new NordVpnClient({ command: config.vpn.command, timeoutMs: config.timeouts.commandMs })): McpServer {
+export function createVpnServer(config: AppConfig, client: VpnClient = new NordVpnClient({ command: config.vpn.command, timeoutMs: config.timeouts.commandMs, windowsStatusProvider: config.vpn.windowsStatusProvider })): McpServer {
   const server = new McpServer({ name: 'vpn-mcp', version: PACKAGE_VERSION });
   const handlers = createVpnToolHandlers(config, client);
 
   for (const [name, spec] of Object.entries(vpnToolSpecs)) {
-    server.registerTool(name, spec, async (args: unknown) => mcpJsonContent(await handlers[name](args)));
+    server.registerTool(name, { ...spec, inputSchema: z.strictObject(spec.inputSchema) }, async (args: unknown) => mcpJsonContent(await handlers[name](args)));
   }
 
   return server;

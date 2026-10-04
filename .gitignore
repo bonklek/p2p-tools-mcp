@@ -1,7 +1,23 @@
 node_modules/
 dist/
+deploy/vpn-qbit/data/
 coverage/
 .env
 *.local.yaml
 *.log
+__pycache__/
+*.pyc
 .DS_Store
+android/upstream/
+android/.build/
+artifacts/
+
+android/tests/bin/
+android/tests/obj/
+
+# Publication excludes generated deliveries and private integration evidence.
+releases/
+*.tgz
+*.apk
+*.pdb
+*.zip

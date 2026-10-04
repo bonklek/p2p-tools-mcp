@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AppConfig } from './shared/config.js';
 import { loadConfigFromString } from './shared/config.js';
 import type { ToolResult } from './shared/tool-result.js';
@@ -34,7 +36,7 @@ function harness(options: {
 }
 
 describe('p2p-tools CLI', () => {
-  it('keeps the CLI version and all three installed binaries in the package manifest', () => {
+  it('keeps the CLI version and all installed binaries in the package manifest', () => {
     const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
       version: string;
       bin: Record<string, string>;
@@ -44,7 +46,9 @@ describe('p2p-tools CLI', () => {
     expect(manifest.bin).toEqual({
       'p2p-tools': 'dist/p2p-tools.js',
       'vpn-mcp': 'dist/vpn-mcp.js',
-      'torrent-mcp': 'dist/torrent-mcp.js'
+      'torrent-mcp': 'dist/torrent-mcp.js',
+      'p2p-tools-android': 'dist/android-cli.js',
+      'p2p-tools-android-mcp': 'dist/android-mcp.js'
     });
   });
 
@@ -77,16 +81,37 @@ describe('p2p-tools CLI', () => {
     expect(JSON.parse(cli.stdout())).toEqual({ ok: true, data: { results: [] } });
   });
 
+  it('passes Soulseek filters and ranking preferences from private JSON input', async () => {
+    const rank = vi.fn(async () => ({ ok: true, data: { ranked: [] } } as const));
+    const cli = harness({
+      stdin: JSON.stringify({
+        search_id: 'ec435694-5c7d-11f1-9cf0-189341ab14ee',
+        filters: { extensions: ['flac'], min_bit_depth: 24 },
+        preferences: ['Prefer studio recordings'], preferred_users: ['trusted-peer']
+      }),
+      torrent: { slskd_rank: rank }
+    });
+
+    await expect(cli.run(['slskd', 'rank', '--stdin', '--limit', '8'])).resolves.toBe(0);
+    expect(rank).toHaveBeenCalledWith({
+      search_id: 'ec435694-5c7d-11f1-9cf0-189341ab14ee', limit: 8,
+      filters: { extensions: ['flac'], min_bit_depth: 24 },
+      preferences: ['Prefer studio recordings'], preferred_users: ['trusted-peer']
+    });
+  });
+
   it('runs a local command through the real shared operation layer', async () => {
     const cli = harness();
 
     const exitCode = await cli.run(['jackett', 'category', '--query', 'audio', '--compact']);
 
     expect(exitCode).toBe(0);
-    expect(JSON.parse(cli.stdout())).toMatchObject({
+    const output = JSON.parse(cli.stdout());
+    expect(output).toMatchObject({
       ok: true,
       data: { exact_matches: [{ id: 3000, name: 'Audio' }] }
     });
+    expect(output.data.exact_matches[0].children[0].name).toBe('Audio/MP3');
   });
 
   it('supports qbit as an alias and merges private JSON input with explicit options', async () => {
@@ -207,5 +232,18 @@ describe('p2p-tools CLI', () => {
     await expect(cli.run(['vpn', 'status', '--compact'])).resolves.toBe(0);
 
     expect(cli.stdout()).toBe('{"ok":true,"data":{"connected":true}}\n');
+  });
+
+  it('plans a bulk manifest without loading configuration or contacting services', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'p2p-bulk-cli-'));
+    try {
+      const manifest = join(directory, 'songs.json');
+      writeFileSync(manifest, JSON.stringify({ version: 1, tracks: [{ id: 'one', query: 'Artist Song' }] }));
+      const loadConfig = vi.fn(() => { throw new Error('must not load'); });
+      const cli = harness({ loadConfig });
+      await expect(cli.run(['slskd', 'bulk', '--manifest', manifest, '--plan'])).resolves.toBe(0);
+      expect(JSON.parse(cli.stdout())).toMatchObject({ ok: true, data: { mode: 'plan', tracks: 1 } });
+      expect(loadConfig).not.toHaveBeenCalled();
+    } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 });

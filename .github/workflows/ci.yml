@@ -20,6 +20,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['24']
+        include:
+          - os: ubuntu-latest
+            node: '20.19.0'
+          - os: ubuntu-latest
+            node: '22.12.0'
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -31,7 +37,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node }}
           cache: npm
 
       - name: Install dependencies
@@ -39,6 +45,9 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      - name: Type-check source and tests
+        run: npm run check
 
       - name: Build
         run: npm run build

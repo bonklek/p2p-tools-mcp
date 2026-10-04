@@ -24,6 +24,24 @@ Transfer: 1.2 MiB received, 3.4 MiB sent
     expect(parseNordVpnStatus('Status: Disconnected').connected).toBe(false);
   });
 
+  it.each([true, false])('reads protected=%s from NordVPN public egress on Windows', async (protectedEgress) => {
+    const runner = vi.fn();
+    const fetcher = vi.fn(async (url, init) => {
+      expect(url).toBe('https://api.nordvpn.com/v1/helpers/ips/insights');
+      expect(init?.redirect).toBe('error');
+      return new Response(JSON.stringify({ protected: protectedEgress, ip: 'fixture' }));
+    }) as typeof fetch;
+    const client = new NordVpnClient({ command: 'nordvpn', platform: 'win32', windowsStatusProvider: 'nord-egress', timeoutMs: 1000 }, runner, fetcher);
+    expect(await client.status()).toEqual({ connected: protectedEgress });
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('fails closed on malformed or unavailable Windows egress status', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ protected: 'yes', ip: 'private' }))) as typeof fetch;
+    const client = new NordVpnClient({ command: 'nordvpn', platform: 'win32', windowsStatusProvider: 'nord-egress', timeoutMs: 1000 }, vi.fn(), fetcher);
+    await expect(client.status()).rejects.toMatchObject({ code: 'VPN_STATUS_UNKNOWN' });
+  });
+
   it('builds connect args with optional country', async () => {
     const runner = vi.fn().mockResolvedValue({ stdout: 'Connecting...', stderr: '', exitCode: 0 });
     const client = new NordVpnClient({ command: 'nordvpn', platform: 'linux' }, runner);

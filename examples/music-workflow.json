@@ -1,0 +1,24 @@
+{
+  "session_dir": "./music-session",
+  "downloads_dir": "./completed-downloads",
+  "library_roots": ["./shared-library"],
+  "phone": {
+    "serial": "REPLACE_WITH_ADB_SERIAL",
+    "music_root": "/storage/emulated/0/Music",
+    "review_root": "/storage/emulated/0/MusicReview",
+    "inventory_roots": ["/storage/emulated/0/Music"]
+  },
+  "tracks": [
+    {"id": "example-1", "artist": "REPLACE_ARTIST", "title": "REPLACE_TITLE", "album": "REPLACE_ALBUM", "duration_ms": 180000}
+  ],
+  "target_unique_songs": 1,
+  "downloads_enabled": false,
+  "delete_sources_after_delivery": false,
+  "pc_minimum_free_bytes": 1073741824,
+  "pc_headroom_bytes": 1073741824,
+  "phone_max_used_percent": 66,
+  "collapse_versions": false,
+  "extensions": ["flac", "mp3"],
+  "auto_select_jev": false,
+  "allow_embedded_review": false
+}

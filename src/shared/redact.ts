@@ -25,7 +25,7 @@ const PEM_PRIVATE_KEY = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]
 const KNOWN_TOKEN = /\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b/g;
 const USER_PATH = /(?:\b[A-Za-z]:[\\/][^\r\n,;"'<>|]+|\\\\[^\r\n,;"'<>|]+|\/(?:Users|home)\/[^\r\n,;"'<>]+)/g;
 const POSIX_PATH = /(?<![:/\w])\/[^\r\n,;"'<>]+/g;
-const RELATIVE_PATH = /(^|[\s"'(])(?:\.{1,2}[\\/])?(?:[^\\/\s:"'<>]+[\\/])+[^\r\n,;"'<>]+/g;
+const RELATIVE_PATH = /(^|[\s"'(])(?:\.{1,2}[\\/](?:[^\\/\s:"'<>]+[\\/])*[^\r\n,;"'<>]+|(?:[^\\/\s:"'<>]+[\\/])+[^\\/\s:"'<>]+\.[A-Za-z0-9]{1,8})/g;
 
 export function redactValue(value: string): string {
   if (value.length > 8_192) return REDACTED;

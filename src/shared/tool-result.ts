@@ -1,9 +1,10 @@
 import { McpError } from './errors.js';
 import { redactConfig } from './redact.js';
+import { publicDiagnostic, type ValidationIssue } from './diagnostics.js';
 
 export type ToolResult =
   | { ok: true; data: unknown }
-  | { ok: false; error: { code: string; message: string } };
+  | { ok: false; error: { code: string; message: string; issues?: ValidationIssue[]; next_action?: string; request_id?: string } };
 
 export async function structuredResult(
   run: () => Promise<unknown>,
@@ -13,7 +14,7 @@ export async function structuredResult(
     return { ok: true, data: redactConfig(await run()) };
   } catch (error) {
     if (error instanceof McpError) {
-      return { ok: false, error: { code: error.code, message: publicErrorMessage(error.code) } };
+      return { ok: false, error: publicDiagnostic(error, publicErrorMessage(error.code)) };
     }
     return { ok: false, error: { code: 'TOOL_ERROR', message: 'The tool operation failed' } };
   }

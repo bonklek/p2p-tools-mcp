@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/jackBonadies/SeekerAndroid.git",
+  "commit": "94a49dd4e724f1e7edc555f9cbe96f20a7a40856",
+  "application_id": "com.bonklek.p2p.android",
+  "bridge_protocol": 1,
+  "target_abi": "arm64-v8a",
+  "license": "GPL-3.0-only with upstream additional terms; retain upstream LICENSE and source"
+}

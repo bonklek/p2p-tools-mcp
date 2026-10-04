@@ -26,7 +26,7 @@ describe('torrent MCP tool handlers', () => {
       vpnStatusProvider: async () => ({ connected: false })
     });
 
-    const addResult = await handlers.torrent_add({ urls: ['magnet:?xt=urn:btih:abc'] });
+    const addResult = await handlers.torrent_add({ urls: ['magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'] });
     const listResult = await handlers.torrent_list({});
 
     expect(addResult.ok).toBe(false);
@@ -52,7 +52,7 @@ network_guard:
     });
 
     const listResult = await handlers.torrent_list({});
-    const getResult = await handlers.torrent_get({ hash: 'h1' });
+    const getResult = await handlers.torrent_get({ hash: '0123456789abcdef0123456789abcdef01234567' });
 
     expect(listResult.ok).toBe(false);
     if (listResult.ok) throw new Error('expected guard failure');
@@ -70,7 +70,7 @@ network_guard:
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('expected validation failure');
-    expect(result.error).toMatchObject({ code: 'INVALID_ARGUMENT', message: 'Invalid tool argument' });
+    expect(result.error).toMatchObject({ code: 'INVALID_ARGUMENT', message: 'url: Supply exactly one of url, urls, magnet_uri, or torrent_url.', next_action: expect.any(String) });
     expect(qbit.add).not.toHaveBeenCalled();
   });
 
@@ -80,7 +80,7 @@ network_guard:
     qbit.get.mockRejectedValueOnce(new Error('boom token=secret'));
     const handlers = createTorrentToolHandlers(config, { jackett: fakeJackett(), qbit, vpnStatusProvider: async () => ({ connected: true }) });
 
-    await expect(handlers.torrent_get({ hash: 'h1' })).resolves.toEqual({
+    await expect(handlers.torrent_get({ hash: '0123456789abcdef0123456789abcdef01234567' })).resolves.toEqual({
       ok: false,
       error: { code: 'TOOL_ERROR', message: 'The tool operation failed' }
     });
@@ -133,7 +133,7 @@ network_guard:
     const handlers = createTorrentToolHandlers(config, { jackett: fakeJackett(), qbit, vpnStatusProvider: async () => ({ connected: true }) });
 
     const success = await handlers.torrent_list({});
-    const failure = await handlers.torrent_get({ hash: 'h1' });
+    const failure = await handlers.torrent_get({ hash: '0123456789abcdef0123456789abcdef01234567' });
 
     expect(JSON.stringify(success)).not.toContain('private');
     expect(JSON.stringify(failure)).not.toContain('private');
@@ -149,7 +149,7 @@ network_guard:
     ));
     const handlers = createTorrentToolHandlers(config, { jackett: fakeJackett(), qbit, vpnStatusProvider: async () => ({ connected: true }) });
 
-    const result = await handlers.torrent_get({ hash: 'h1' });
+    const result = await handlers.torrent_get({ hash: '0123456789abcdef0123456789abcdef01234567' });
 
     expect(result).toEqual({ ok: false, error: { code: 'HOSTILE_ERROR', message: 'The tool operation failed' } });
   });

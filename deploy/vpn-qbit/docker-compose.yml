@@ -29,6 +29,7 @@ services:
     depends_on:
       vpn:
         condition: service_healthy
+        restart: true
     environment:
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
@@ -47,6 +48,7 @@ services:
     depends_on:
       vpn:
         condition: service_healthy
+        restart: true
     environment:
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}

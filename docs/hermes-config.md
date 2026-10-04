@@ -66,6 +66,7 @@ mcp_vpn_vpn_disconnect
 mcp_vpn_vpn_public_ip
 mcp_vpn_vpn_require_active
 
+mcp_torrent_p2p_doctor
 mcp_torrent_jackett_test_connection
 mcp_torrent_jackett_search
 mcp_torrent_jackett_caps
@@ -85,7 +86,7 @@ Exact prefixes depend on the server keys and Hermes version. The MCP server's un
 
 ## First verification
 
-After restart, call:
+After restart, call `p2p_doctor` for a read-only overview and recovery steps. Inspect its report status and individual checks; successful report delivery does not verify traffic isolation. For individual service checks, call:
 
 ```text
 jackett_test_connection
